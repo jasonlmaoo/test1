@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deadlock Stat Lookup</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #1a1a1f;
+      color: #eeeeee;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    input, button {
+      font-size: 16px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: none;
+    }
+    input  { width: 260px; }
+    button { background: #e0a030; cursor: pointer; }
+    table  { border-collapse: collapse; width: 100%; margin-top: 20px; }
+    th, td { border: 1px solid #444; padding: 8px; text-align: center; }
+    th     { background: #2a2a33; }
+    #status { margin-top: 15px; color: #e0a030; }
+    #raw    { background: #101014; padding: 10px; margin-top: 20px;
+              max-height: 250px; overflow: auto; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+  <h1>Deadlock Stat Lookup</h1>
+  <p>Type a Steam ID (the long 17-digit one, or the short account ID).</p>
+
+  <input id="playerInput" placeholder="Steam ID">
+  <button id="lookupButton">Look up</button>
+
+  <p id="status"></p>
+  <div id="results"></div>
+
+  <details>
+    <summary>Show raw data (helps with debugging)</summary>
+    <pre id="raw"></pre>
+  </details>
+
+  <script>
+    // ============================================================
+    // PART 1: SETTINGS
+    // Everything that might need fixing is up here in one place.
+    // Check the API docs on deadlock-api.com to confirm these.
+    // ============================================================
+    const API_BASE    = "https://api.deadlock-api.com";
+    const ASSETS_BASE = "https://assets.deadlock-api.com";
+
+    // Builds the web address for a player's per-hero stats.
+    function heroStatsUrl(accountId) {
+      return API_BASE + "/v1/players/hero-stats?account_ids=" + accountId;
+    }
+
+    // Address for the list of heroes (so we can show names, not numbers).
+    const HEROES_URL = ASSETS_BASE + "/v2/heroes";
+
+
+    // ============================================================
+    // PART 2: GRAB THE PIECES OF THE PAGE
+    // ============================================================
+    const playerInput  = document.getElementById("playerInput");
+    const lookupButton = document.getElementById("lookupButton");
+    const statusText   = document.getElementById("status");
+    const resultsBox   = document.getElementById("results");
+    const rawBox       = document.getElementById("raw");
+
+
+    // ============================================================
+    // PART 3: HELPER FUNCTIONS
+    // ============================================================
+
+    // Steam has two kinds of IDs for the same person:
+    //   - Steam64: a huge 17-digit number (starts with 7656...)
+    //   - Account ID: the short one
+    // The Deadlock API wants the short one, so we convert if needed.
+    function toAccountId(text) {
+      const cleaned = text.trim();
+      if (cleaned.length >= 16) {
+        // BigInt is used because the number is too big for normal math.
+        const steam64 = BigInt(cleaned);
+        return (steam64 - 76561197960265728n).toString();
+      }
+      return cleaned;
+    }
+
+    // Some APIs name the same thing differently ("wins" vs "win_count").
+    // This tries each name in a list and returns the first one it finds.
+    function pick(obj, names, fallback = 0) {
+      for (const name of names) {
+        if (obj[name] !== undefined) return obj[name];
+      }
+      return fallback;
+    }
+
+    // Turns a number like 0.5234 into "52.3%".
+    function percent(part, total) {
+      if (!total) return "0%";
+      return ((part / total) * 100).toFixed(1) + "%";
+    }
+
+
+    // ============================================================
+    // PART 4: GET THE HERO NAMES
+    // Returns a lookup like { 1: "Infernus", 2: "Seven", ... }
+    // If this fails, we just show hero ID numbers instead.
+    // ============================================================
+    async function getHeroNames() {
+      const names = {};
+      try {
+        const response = await fetch(HEROES_URL);
+        const heroes = await response.json();
+        for (const hero of heroes) {
+          names[hero.id] = hero.name;
+        }
+      } catch (error) {
+        console.log("Could not load hero names:", error);
+      }
+      return names;
+    }
+
+
+    // ============================================================
+    // PART 5: SHOW THE TABLE
+    // ============================================================
+    function showTable(heroStats, heroNames) {
+      let rows = "";
+
+      for (const hero of heroStats) {
+        const heroId  = pick(hero, ["hero_id"], "?");
+        const matches = pick(hero, ["matches_played", "matches"]);
+        const wins    = pick(hero, ["wins"]);
+        const kills   = pick(hero, ["kills"]);
+        const deaths  = pick(hero, ["deaths"]);
+        const assists = pick(hero, ["assists"]);
+
+        const name = heroNames[heroId] || "Hero #" + heroId;
+
+        rows += "<tr>" +
+          "<td>" + name + "</td>" +
+          "<td>" + matches + "</td>" +
+          "<td>" + percent(wins, matches) + "</td>" +
+          "<td>" + kills + " / " + deaths + " / " + assists + "</td>" +
+          "</tr>";
+      }
+
+      resultsBox.innerHTML =
+        "<table>" +
+        "<tr><th>Hero</th><th>Matches</th><th>Win rate</th><th>K / D / A</th></tr>" +
+        rows +
+        "</table>";
+    }
+
+
+    // ============================================================
+    // PART 6: THE MAIN LOOKUP (runs when the button is clicked)
+    // ============================================================
+    async function lookupPlayer() {
+      const text = playerInput.value;
+
+      if (!text.trim()) {
+        statusText.textContent = "Please type a Steam ID first.";
+        return;
+      }
+
+      statusText.textContent = "Loading...";
+      resultsBox.innerHTML = "";
+      rawBox.textContent = "";
+
+      try {
+        const accountId = toAccountId(text);
+
+        // Ask for hero stats and hero names at the same time.
+        const [response, heroNames] = await Promise.all([
+          fetch(heroStatsUrl(accountId)),
+          getHeroNames()
+        ]);
+
+        if (!response.ok) {
+          statusText.textContent = "The API said no (code " + response.status + ").";
+          return;
+        }
+
+        const data = await response.json();
+        rawBox.textContent = JSON.stringify(data, null, 2);
+
+        // The API might return a list directly, or wrap it in an object.
+        const heroStats = Array.isArray(data) ? data : (data.heroes || []);
+
+        if (heroStats.length === 0) {
+          statusText.textContent = "No stats found for that player.";
+          return;
+        }
+
+        showTable(heroStats, heroNames);
+        statusText.textContent = "Done!";
+
+      } catch (error) {
+        console.log(error);
+        statusText.textContent = "Something went wrong. Check the ID and try again.";
+      }
+    }
+
+    lookupButton.addEventListener("click", lookupPlayer);
+
+    // Let the Enter key work too.
+    playerInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") lookupPlayer();
+    });
+  </script>
+
+</body>
+</html>
